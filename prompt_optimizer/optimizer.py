@@ -32,7 +32,7 @@ class MiniBatchResult:
     feedback: str
 
 
-class Gepa_PromptOptimizer:
+class PromptOptimizer:
     PROMPT_DIR = Path(__file__).resolve().parents[1] / "optimizer_prompts"
     REFLECTION_RETRY_MESSAGE = (
         "Invalid, try again. Return only the corrected prompt inside "
