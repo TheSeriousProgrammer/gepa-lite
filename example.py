@@ -4,8 +4,7 @@ import operator
 import re
 
 from dotenv import load_dotenv
-from langchain_core.messages import BaseMessage
-from langchain_openai import ChatOpenAI
+from litellm import Router
 
 from prompt_optimizer import PromptOptimizer
 
@@ -28,8 +27,6 @@ def safe_eval(expr: str) -> float:
         if isinstance(node, ast.UnaryOp):
             operand = eval_node(node.operand)
             return allowed_operators[type(node.op)](operand)
-        if isinstance(node, ast.Num) and isinstance(node.n, (int, float)):
-            return float(node.n)
         if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
             return float(node.value)
         raise TypeError("Unsupported expression")
@@ -38,10 +35,7 @@ def safe_eval(expr: str) -> float:
     return eval_node(parsed.body)
 
 
-def extract_answer(message: BaseMessage) -> float | None:
-    content = message.content
-    if not isinstance(content, str):
-        content = str(content)
+def extract_answer(content: str) -> float | None:
     matches = re.findall(r"<ans>(.*?)</ans>", content, flags=re.DOTALL)
     if not matches:
         return None
@@ -51,7 +45,7 @@ def extract_answer(message: BaseMessage) -> float | None:
         return None
 
 
-def metric(prediction: BaseMessage, datapoint: dict) -> tuple[float, str]:
+def metric(prediction: str, datapoint: dict) -> tuple[float, str]:
     predicted_value = extract_answer(prediction)
     if predicted_value is None:
         return 0.0, "Missing or invalid <ans> tag in prediction"
@@ -121,42 +115,52 @@ test_data = [
 ]
 
 seed_prompt = (
-    "Think step by step and Solve the expression and respond only with <ans>number</ans>.\n"
+    "Solve the expression and respond only with <ans>number</ans>.\n"
     "Expression: {{ input_1 }}"
 )
 
 
-def build_optimizer(student_llm, reflection_llm) -> PromptOptimizer:
+def build_optimizer() -> PromptOptimizer:
+    api_key = getenv("OPENROUTER_API_KEY")
+    api_base = "https://openrouter.ai/api/v1"
+    router = Router(
+        model_list=[
+            {
+                "model_name": "student",
+                "litellm_params": {
+                    "model": "openrouter/meta-llama/llama-3.2-1b-instruct",
+                    "api_key": api_key,
+                    "api_base": api_base,
+                },
+            },
+            {
+                "model_name": "reflection",
+                "litellm_params": {
+                    "model": "openrouter/google/gemini-2.5-flash-lite",
+                    "api_key": api_key,
+                    "api_base": api_base,
+                },
+            },
+        ]
+    )
+
     return PromptOptimizer(
         seed_prompt=seed_prompt,
-        student_llm=student_llm,
-        reflection_llm=reflection_llm,
+        router=router,
+        student_max_tokens=1024,
         train_data=train_data,
         test_data=test_data,
         metric=metric,
         compulsory_input_keys=["input_1"],
         minibatch_size=5,
         num_threads=5,
-        max_rollouts=8,
+        max_rollouts=1,
     )
 
 
 load_dotenv()
 
-student_llm = ChatOpenAI(
-    api_key=getenv("OPENROUTER_API_KEY"),
-    base_url="https://openrouter.ai/api/v1",
-    model="meta-llama/llama-3.2-1b-instruct",
-    max_completion_tokens=1024,
-)
-
-reflection_llm = ChatOpenAI(
-    api_key=getenv("OPENROUTER_API_KEY"),
-    base_url="https://openrouter.ai/api/v1",
-    model="google/gemini-2.5-flash-lite",
-)
-
-optimizer = build_optimizer(student_llm, reflection_llm)
+optimizer = build_optimizer()
 optimizer.run()
 seed_key = "P0"
 seed_average = optimizer.candidate_average(seed_key)

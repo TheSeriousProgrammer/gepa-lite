@@ -9,11 +9,11 @@ from threading import Lock
 from typing import Callable, Iterable
 
 from jinja2 import Environment, TemplateSyntaxError, meta
-from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from litellm import Router
 from tqdm import tqdm
 
-MetricFn = Callable[[BaseMessage, dict], tuple[float, str]]
+LLMMessage = dict[str, str]
+MetricFn = Callable[[str, dict], tuple[float, str]]
 DataPoint = dict
 
 
@@ -27,12 +27,12 @@ class PromptCandidate:
 @dataclass(frozen=True)
 class MiniBatchResult:
     inputs: dict
-    prediction: BaseMessage
+    prediction: str
     reward: float
     feedback: str
 
 
-class PromptOptimizer:
+class Gepa_PromptOptimizer:
     PROMPT_DIR = Path(__file__).resolve().parents[1] / "optimizer_prompts"
     REFLECTION_RETRY_MESSAGE = (
         "Invalid, try again. Return only the corrected prompt inside "
@@ -42,12 +42,15 @@ class PromptOptimizer:
     def __init__(
         self,
         seed_prompt: str,
-        student_llm: BaseChatModel,
-        reflection_llm: BaseChatModel,
+        router: Router,
         train_data: list[DataPoint],
         test_data: list[DataPoint],
         metric: MetricFn,
         compulsory_input_keys: list[str],
+        student_model: str = "student",
+        reflection_model: str = "reflection",
+        student_max_tokens: int | None = None,
+        reflection_max_tokens: int | None = None,
         minibatch_size: int = 4,
         num_threads: int = 4,
         max_rollouts: int | None = 5,
@@ -67,12 +70,26 @@ class PromptOptimizer:
             raise ValueError("max_reflection_retries must be positive")
         if num_threads <= 0:
             raise ValueError("num_threads must be positive")
+        router_model_names = {item["model_name"] for item in router.model_list}
+        missing_models = {
+            model_name
+            for model_name in (student_model, reflection_model)
+            if model_name not in router_model_names
+        }
+        if missing_models:
+            raise ValueError(
+                "Router is missing required model declarations: "
+                f"{sorted(missing_models)}"
+            )
 
         self._prompts: dict[str, str] = {"P0": seed_prompt}
         self._prompt_counter = 1
         self._seed_prompt_key = "P0"
-        self._student_llm = student_llm
-        self._reflection_llm = reflection_llm
+        self._router = router
+        self._student_model = student_model
+        self._reflection_model = reflection_model
+        self._student_max_tokens = student_max_tokens
+        self._reflection_max_tokens = reflection_max_tokens
         self._train_data = train_data
         self._test_data = test_data
         self._metric = metric
@@ -231,10 +248,13 @@ class PromptOptimizer:
     ) -> list[MiniBatchResult]:
         def run_item(datapoint: DataPoint) -> MiniBatchResult:
             prompt = self._render_prompt(template, datapoint["inputs"])
-            message = HumanMessage(content=prompt)
             with self._llm_lock:
                 self._llm_calls += 1
-            prediction = self._student_llm.invoke([message])
+            prediction = self._call_llm(
+                self._student_model,
+                [{"role": "user", "content": prompt}],
+                self._student_max_tokens,
+            )
             reward, feedback = self._metric(prediction, datapoint)
             return MiniBatchResult(
                 inputs=datapoint["inputs"],
@@ -257,7 +277,11 @@ class PromptOptimizer:
             prompt = self._render_prompt(template, datapoint["inputs"])
             with self._llm_lock:
                 self._llm_calls += 1
-            prediction = self._student_llm.invoke([HumanMessage(content=prompt)])
+            prediction = self._call_llm(
+                self._student_model,
+                [{"role": "user", "content": prompt}],
+                self._student_max_tokens,
+            )
             return self._metric(prediction, datapoint)
 
         with ThreadPoolExecutor(max_workers=self._num_threads) as executor:
@@ -306,36 +330,36 @@ class PromptOptimizer:
         seed_prompt = self._prompt_by_key(seed_prompt_key)
         lines: list[str] = []
         for idx, result in enumerate(results, start=1):
-            prediction_content = result.prediction.content
-            if not isinstance(prediction_content, str):
-                prediction_content = str(prediction_content)
             lines.append(f"Example {idx}:")
             lines.append(f"Inputs: {result.inputs}")
-            lines.append(f"Prediction: {prediction_content}")
+            lines.append(f"Prediction: {result.prediction}")
             lines.append(f"Reward: {result.reward}")
             lines.append(f"Feedback: {result.feedback}")
         feedback_context = self._reflection_context_template.format(
             seed_prompt=seed_prompt,
             examples="\n".join(lines),
         )
-        system_message = SystemMessage(content=self._reflection_system_template)
-        messages = [system_message, HumanMessage(content=feedback_context)]
+        messages = [
+            {"role": "system", "content": self._reflection_system_template},
+            {"role": "user", "content": feedback_context},
+        ]
         return self._extract_improved_prompt(messages)
 
     def _load_prompt(self, filename: str) -> str:
         prompt_path = self.PROMPT_DIR / filename
         return prompt_path.read_text(encoding="utf-8")
 
-    def _extract_improved_prompt(self, messages: list[BaseMessage]) -> str | None:
+    def _extract_improved_prompt(self, messages: list[LLMMessage]) -> str | None:
         retries = 0
 
         while retries < self._max_reflection_retries:
             with self._llm_lock:
                 self._llm_calls += 1
-            response = self._reflection_llm.invoke(messages)
-            content = response.content
-            if not isinstance(content, str):
-                content = str(content)
+            content = self._call_llm(
+                self._reflection_model,
+                messages,
+                self._reflection_max_tokens,
+            )
             matches = re.findall(
                 r"<improved_prompt>(.*?)</improved_prompt>",
                 content,
@@ -350,23 +374,36 @@ class PromptOptimizer:
                         return extracted
                     messages = [
                         *messages,
-                        HumanMessage(
-                            content=self._format_reflection_retry_message(
+                        {
+                            "role": "user",
+                            "content": self._format_reflection_retry_message(
                                 error=error,
                                 variables=variables,
-                            )
-                        ),
+                            ),
+                        },
                     ]
                     retries += 1
                     continue
 
             messages = [
                 *messages,
-                HumanMessage(content=self.REFLECTION_RETRY_MESSAGE),
+                {"role": "user", "content": self.REFLECTION_RETRY_MESSAGE},
             ]
             retries += 1
 
         return None
+
+    def _call_llm(
+        self,
+        model: str,
+        messages: list[LLMMessage],
+        max_tokens: int | None,
+    ) -> str:
+        kwargs = {"model": model, "messages": messages, "max_tokens": max_tokens}
+        response = self._router.completion(
+            **{key: value for key, value in kwargs.items() if value is not None}
+        )
+        return response.choices[0].message.content or ""
 
     def _format_reflection_retry_message(
         self,

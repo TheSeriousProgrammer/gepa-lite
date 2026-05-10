@@ -1,5 +1,5 @@
 def main():
-    print("Hello from customgepa!")
+    print("Hello from gepa-lite!")
 
 
 if __name__ == "__main__":
