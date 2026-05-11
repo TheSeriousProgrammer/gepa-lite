@@ -2,10 +2,12 @@
 
 `gepa-lite` is a small prompt optimizer inspired by GEPA-style reflection. It evaluates a seed prompt, asks a reflection model to propose improved prompt templates, keeps candidates that improve minibatch performance, and tracks the best prompt on a held-out test set.
 
-The optimizer uses LiteLLM's `Router`. Declare two router model names by default:
+The optimizer uses LiteLLM's `Router`. Declare these two router model names:
 
 - `student`: model used to answer task prompts
 - `reflection`: model used to rewrite prompts from feedback
+
+`PromptOptimizer` validates those declarations when it starts.
 
 ## Install
 
@@ -29,7 +31,7 @@ The included example uses OpenRouter models through LiteLLM.
 from os import getenv
 
 from litellm import Router
-from prompt_optimizer import PromptOptimizer
+from gepa_lite import PromptOptimizer
 
 router = Router(
     model_list=[
@@ -44,7 +46,7 @@ router = Router(
         {
             "model_name": "reflection",
             "litellm_params": {
-                "model": "openrouter/google/gemini-2.5-flash-lite",
+                "model": "openrouter/google/gemini-3.1-flash-lite",
                 "api_key": getenv("OPENROUTER_API_KEY"),
                 "api_base": "https://openrouter.ai/api/v1",
             },
@@ -64,6 +66,8 @@ optimizer.run()
 print(optimizer.best_prompt)
 ```
 
+The router model names are fixed to `student` and `reflection`. Put any provider, key, base URL, fallback, or routing configuration in the LiteLLM `Router` itself.
+
 `metric` receives the model prediction as a plain string and the original datapoint:
 
 ```python
@@ -76,7 +80,13 @@ Prompt templates are Jinja templates. The optimizer validates that every prompt 
 ## Run The Example
 
 ```bash
-uv run python example.py
+uv run python -m gepa_lite.example
 ```
 
 The example performs one rollout to keep it usable as a smoke test. It still makes real LLM calls.
+
+## Package Layout
+
+- `gepa_lite/optimizer.py`: `PromptOptimizer` implementation
+- `gepa_lite/optimizer_prompts/`: reflection system/context templates used by the optimizer
+- `gepa_lite/example.py`: arithmetic prompt-optimization example using OpenRouter through LiteLLM
