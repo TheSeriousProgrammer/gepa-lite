@@ -33,7 +33,7 @@ class MiniBatchResult:
 
 
 class PromptOptimizer:
-    PROMPT_DIR = Path(__file__).resolve().parents[1] / "optimizer_prompts"
+    PROMPT_DIR = Path(__file__).resolve().parent / "optimizer_prompts"
     REFLECTION_RETRY_MESSAGE = (
         "Invalid, try again. Return only the corrected prompt inside "
         "<improved_prompt>...</improved_prompt>."
@@ -47,14 +47,12 @@ class PromptOptimizer:
         test_data: list[DataPoint],
         metric: MetricFn,
         compulsory_input_keys: list[str],
-        student_model: str = "student",
-        reflection_model: str = "reflection",
         student_max_tokens: int | None = None,
         reflection_max_tokens: int | None = None,
         minibatch_size: int = 4,
         num_threads: int = 4,
         max_rollouts: int | None = 5,
-        llm_call_budget: int | None = 500,
+        llm_call_budget: int | None = None,
         max_reflection_retries: int = 3,
         random_seed: int | None = None,
     ) -> None:
@@ -71,9 +69,12 @@ class PromptOptimizer:
         if num_threads <= 0:
             raise ValueError("num_threads must be positive")
         router_model_names = {item["model_name"] for item in router.model_list}
+
+        expected_model_keys = ["student", "reflection"]
+
         missing_models = {
             model_name
-            for model_name in (student_model, reflection_model)
+            for model_name in expected_model_keys
             if model_name not in router_model_names
         }
         if missing_models:
@@ -86,8 +87,6 @@ class PromptOptimizer:
         self._prompt_counter = 1
         self._seed_prompt_key = "P0"
         self._router = router
-        self._student_model = student_model
-        self._reflection_model = reflection_model
         self._student_max_tokens = student_max_tokens
         self._reflection_max_tokens = reflection_max_tokens
         self._train_data = train_data
@@ -251,7 +250,7 @@ class PromptOptimizer:
             with self._llm_lock:
                 self._llm_calls += 1
             prediction = self._call_llm(
-                self._student_model,
+                "student",
                 [{"role": "user", "content": prompt}],
                 self._student_max_tokens,
             )
@@ -278,7 +277,7 @@ class PromptOptimizer:
             with self._llm_lock:
                 self._llm_calls += 1
             prediction = self._call_llm(
-                self._student_model,
+                "student",
                 [{"role": "user", "content": prompt}],
                 self._student_max_tokens,
             )
@@ -356,7 +355,7 @@ class PromptOptimizer:
             with self._llm_lock:
                 self._llm_calls += 1
             content = self._call_llm(
-                self._reflection_model,
+                "reflection",
                 messages,
                 self._reflection_max_tokens,
             )

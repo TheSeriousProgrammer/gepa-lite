@@ -6,7 +6,7 @@ import re
 from dotenv import load_dotenv
 from litellm import Router
 
-from prompt_optimizer import PromptOptimizer
+from gepa_lite.optimizer import PromptOptimizer
 
 
 def safe_eval(expr: str) -> float:
@@ -136,7 +136,7 @@ def build_optimizer() -> PromptOptimizer:
             {
                 "model_name": "reflection",
                 "litellm_params": {
-                    "model": "openrouter/google/gemini-2.5-flash-lite",
+                    "model": "openrouter/google/gemini-3.1-flash-lite",
                     "api_key": api_key,
                     "api_base": api_base,
                 },
